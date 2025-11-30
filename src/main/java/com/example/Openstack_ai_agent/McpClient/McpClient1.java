@@ -33,9 +33,12 @@ public class McpClient1 {
     }
 
     public Mono<String> predictContainerHealth(String name, int hours) {
-        String url = String.format("http://localhost:9000/metrics/predict/%s?hours=%d", name, hours);
+        // String url =
+        // String.format("http://localhost:9000/metrics/predict/%s?hours=%d", name,
+        // hours);
         return webClient.get()
-                .uri(url)
+                // .uri(url)
+                .uri("/metrics/predict/{name}?hours={hours}", name, hours)
                 .retrieve()
                 .bodyToMono(String.class)
                 .onErrorResume(e -> Mono.just("❌ Failed to fetch prediction: " + e.getMessage()));

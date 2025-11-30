@@ -2,6 +2,8 @@ package com.example.Openstack_ai_agent.AgentAI;
 
 import com.example.Openstack_ai_agent.McpClient.McpClient;
 import com.example.Openstack_ai_agent.McpClient.McpClient1;
+import com.example.Openstack_ai_agent.McpClient.McpClientk8s;
+import com.example.Openstack_ai_agent.McpClient.McpClientopenstack;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.client.ChatClient;
@@ -22,15 +24,21 @@ import java.util.Map;
 public class Aiagent {
     private final ChatClient chatClient;
     private final McpClient mcpClient;
+    private final McpClientk8s mcpClientk8s;
+    private final McpClientopenstack mcpClientopenstack;
     private final McpClient1 mcpClient1;
 
     public Aiagent(
             ChatClient.Builder chatClient,
             ChatMemory chatMemory,
             McpClient mcpClient,
-            McpClient1 mcpClient1) {
+            McpClient1 mcpClient1,
+            McpClientopenstack mcpClientopenstack,
+            McpClientk8s mcpClientk8s) {
         this.mcpClient = mcpClient;
         this.mcpClient1 = mcpClient1;
+        this.mcpClientk8s = mcpClientk8s;
+        this.mcpClientopenstack = mcpClientopenstack;
 
         this.chatClient = chatClient
                 .defaultSystem(
@@ -226,6 +234,94 @@ public class Aiagent {
                             .user(predictionJson)
                             .stream()
                             .content());
+
+        } else if (lower.contains("k8s") &&
+                lower.contains("namespace") &&
+                lower.contains("pods") &&
+                (lower.contains("list") || lower.contains("show"))) {
+
+            String[] np = extractNamespaceAndPod(lower);
+            String namespace = np[0];
+
+            return mcpClientk8s.listPodsInNamespace(namespace)
+                    .flatMapMany(json -> chatClient.prompt()
+                            .system("""
+                                        Format this Kubernetes pod list in a clean readable format.
+                                        Use emojis and show:
+                                        - Pod name
+                                        - Namespace
+                                        - Status
+                                        - Node
+                                        - Containers
+                                    """)
+                            .user(json)
+                            .stream()
+                            .content());
+        } else if (lower.contains("k8s") &&
+                lower.contains("log") && // logs, log
+                lower.contains("pod") // pod name
+        ) {
+            String[] np = extractNamespaceAndPod(lower);
+            String namespace = np[0];
+            String pod = np[1];
+
+            return mcpClientk8s.getPodLogs(namespace, pod)
+                    .flatMapMany(logs -> chatClient.prompt()
+                            .system("""
+                                        You are a Kubernetes log analysis assistant.
+                                        Analyze these pod logs:
+                                        - Detect errors (CrashLoopBackOff, OOMKilled, ImagePull errors)
+                                        - Summarize the root cause
+                                        - Suggest 1–3 fixes
+                                        - Use emojis and concise explanations
+                                    """)
+                            .user(logs)
+                            .stream()
+                            .content());
+        }
+
+        else if (lower.contains("@k8s-boot") && (lower.contains("analyze pod") || lower.contains("check pod"))) {
+
+            String[] np = extractNamespaceAndPod(lower);
+            String namespace = np[0];
+            String pod = np[1];
+
+            return mcpClientk8s.getPodLogs(namespace, pod)
+                    .flatMapMany(logs -> chatClient.prompt()
+                            .system("""
+                                        You are a Kubernetes log analysis assistant.
+                                        Analyze these pod logs:
+                                        - Identify errors (CrashLoopBackOff, OOMKilled, ImagePull errors)
+                                        - Summarize the root cause
+                                        - Suggest 1–3 fixes
+                                        - Use emojis and concise explanations.
+                                        Include the namespace and pod name at the beginning.
+                                    """)
+                            .user("Namespace: " + namespace + "\nPod: " + pod + "\n\nLogs:\n" + logs)
+                            .stream()
+                            .content());
+        }
+        // openstack///////////////////////////////////////////////////////////////
+        else if (lower.contains("openstack") && lower.contains("list nodes")) {
+            return mcpClientopenstack.listNodes().flux();
+        } else if (lower.contains("openstack") && lower.contains("list services")) {
+            return mcpClientopenstack.listServices().flux();
+        } else if (lower.contains("openstack") && lower.contains("analyze")) {
+            String service = extractServiceName(lower);
+
+            return mcpClientopenstack.analyzeService(service)
+                    .flatMapMany(json -> chatClient.prompt()
+                            .system("""
+                                        You are an OpenStack troubleshooting assistant.
+                                        Analyze the service health, logs, metrics:
+                                        - Detect failures (API down, message queue, DB issues)
+                                        - Identify controllers/compute issues
+                                        - Suggest fixes (restart service, check RabbitMQ, DB, network)
+                                        Use emojis and structured bullet points.
+                                    """)
+                            .user(json)
+                            .stream()
+                            .content());
         }
 
         else {
@@ -235,6 +331,50 @@ public class Aiagent {
                     .stream()
                     .content();
         }
+    }
+
+    private String[] extractNamespaceAndPod(String query) {
+        query = query.toLowerCase().trim();
+
+        String namespace = "default"; // fallback if not specified
+        String pod = null;
+
+        // Case 1: "namespace xyz" pattern
+        Pattern nsPattern = Pattern.compile("namespace\\s+([a-z0-9-]+)");
+        Matcher nsMatcher = nsPattern.matcher(query);
+        if (nsMatcher.find()) {
+            namespace = nsMatcher.group(1);
+        }
+
+        // Case 2: "ns xyz" shorthand
+        Pattern nsShort = Pattern.compile("\\sns\\s+([a-z0-9-]+)");
+        Matcher nsShortMatch = nsShort.matcher(query);
+        if (nsShortMatch.find()) {
+            namespace = nsShortMatch.group(1);
+        }
+
+        // Case 3: "pod xyz"
+        Pattern podPattern = Pattern.compile("pod\\s+([a-z0-9-]+)");
+        Matcher podMatcher = podPattern.matcher(query);
+        if (podMatcher.find()) {
+            pod = podMatcher.group(1);
+        }
+
+        // Case 4: "namespace/pod" format
+        Pattern nsPodPattern = Pattern.compile("([a-z0-9-]+)/([a-z0-9-]+)");
+        Matcher nsPodMatcher = nsPodPattern.matcher(query);
+        if (nsPodMatcher.find()) {
+            namespace = nsPodMatcher.group(1);
+            pod = nsPodMatcher.group(2);
+        }
+
+        // If pod still null → fallback to last word
+        if (pod == null) {
+            String[] words = query.split("\\s+");
+            pod = words[words.length - 1];
+        }
+
+        return new String[] { namespace, pod };
     }
 
     private int extractHours(String query) {
@@ -296,6 +436,17 @@ public class Aiagent {
     private String extractId(String query) {
         String[] parts = query.split(" ");
         return parts[parts.length - 1];
+    }
+
+    // Simple sirvice extractor
+    private String extractServiceName(String query) {
+        String[] words = query.split("\\s+");
+        for (int i = 0; i < words.length; i++) {
+            if (words[i].equals("service") && i + 1 < words.length) {
+                return words[i + 1];
+            }
+        }
+        return words[words.length - 1];
     }
 
     // command extractor
